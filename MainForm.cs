@@ -28,6 +28,14 @@ internal sealed class MainForm : Form
     private readonly DisplayService service = new();
     private readonly Settings settings;
     private readonly NotifyIcon tray;
+    private readonly Icon appIcon = UiAssets.LoadIcon();
+    private readonly Bitmap gearImage = UiAssets.Gear(28);
+    private readonly StartupRegistration startup = new();
+    private readonly Form settingsWindow;
+    private readonly TabControl settingsTabs = new() { Dock = DockStyle.Fill, Padding = new(18, 8) };
+    private readonly CheckBox startupOption = new() { Text = "开机自启动（登录 Windows 后在托盘运行）", AutoSize = true };
+    private readonly ComboBox closeOption = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250 };
+    private readonly Label generalStatus = new() { AutoSize = false, Width = 660, Height = 65, ForeColor = Color.FromArgb(55, 105, 120) };
     private readonly FlowLayoutPanel displayList = new() { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new(12) };
     private readonly RichTextBox diagnostics = new() { Dock = DockStyle.Fill, ReadOnly = true, BorderStyle = BorderStyle.None, BackColor = Color.White, Font = new("Microsoft YaHei UI", 10), DetectUrls = true };
     private readonly Label status = new() { Dock = DockStyle.Bottom, Height = 52, Padding = new(20, 8, 12, 8), ForeColor = Color.FromArgb(65, 79, 94) };
@@ -39,66 +47,139 @@ internal sealed class MainForm : Form
     private List<HotkeyBinding> registered = [];
     private bool scanning, quitting, busy, updating, resourcesDisposed;
     private readonly bool preview;
+    private readonly bool startInTray;
     private readonly System.Windows.Forms.Timer topologyTimer = new() { Interval = 1200 };
     private int activeOperations;
     private readonly string initialError;
 
-    internal MainForm(bool preview = false)
+    internal MainForm(bool preview = false, Settings? settingsOverride = null, bool startInTray = false)
     {
         this.preview = preview;
-        settings = Settings.Load(out initialError);
+        this.startInTray = startInTray;
+        if (settingsOverride != null) { settings = settingsOverride; initialError = ""; }
+        else settings = Settings.Load(out initialError);
         Text = "ScreenLight · 屏幕亮度";
         Font = new("Microsoft YaHei UI", 10);
         BackColor = Color.FromArgb(244, 247, 251);
         ForeColor = Color.FromArgb(30, 43, 58);
         ClientSize = new(800, 620); MinimumSize = new(720, 570);
         StartPosition = FormStartPosition.CenterScreen;
-        Icon = SystemIcons.Application;
+        Icon = appIcon;
 
-        var header = new Panel { Dock = DockStyle.Top, Height = 108, BackColor = Color.FromArgb(27, 43, 66), Padding = new(22, 18, 20, 14) };
-        header.Controls.Add(new Label { Text = "屏幕亮度", Font = new("Microsoft YaHei UI", 22, FontStyle.Bold), ForeColor = Color.White, AutoSize = true, Location = new(22, 14) });
+        var header = new Panel { Width = ClientSize.Width, Dock = DockStyle.Top, Height = 108, BackColor = Color.FromArgb(27, 43, 66), Padding = new(22, 18, 20, 14) };
+        header.Controls.Add(new PictureBox { Image = appIcon.ToBitmap(), SizeMode = PictureBoxSizeMode.Zoom, Size = new(44, 44), Location = new(24, 14) });
+        header.Controls.Add(new Label { Text = "屏幕亮度", Font = new("Microsoft YaHei UI", 22, FontStyle.Bold), ForeColor = Color.White, AutoSize = true, Location = new(81, 14) });
         header.Controls.Add(new Label { Text = "真实背光调节  /  独立控制每块屏幕  /  自定义全局快捷键", ForeColor = Color.FromArgb(187, 206, 229), AutoSize = true, Location = new(25, 66) });
-        var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new(18, 8) };
-        var screenTab = new TabPage("亮度") { BackColor = BackColor };
+        var gear = new Button { Image = gearImage, Size = new(48, 44), Location = new(ClientSize.Width - 70, 15), Anchor = AnchorStyles.Top | AnchorStyles.Right, FlatStyle = FlatStyle.Flat, BackColor = header.BackColor, AccessibleName = "设置", AccessibleDescription = "打开常规设置、快捷键和检测与帮助", Cursor = Cursors.Hand };
+        gear.FlatAppearance.BorderSize = 0;
+        gear.FlatAppearance.MouseOverBackColor = Color.FromArgb(48, 71, 102);
+        gear.Click += (_, _) => ShowSettings();
+        var tooltip = new ToolTip(); tooltip.SetToolTip(gear, "设置");
+        header.Disposed += (_, _) => tooltip.Dispose();
+        header.Controls.Add(gear);
+        var screenPanel = new Panel { Dock = DockStyle.Fill, BackColor = BackColor };
         var bar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 50, Padding = new(15, 8, 10, 4) };
         bar.Controls.Add(refresh); refresh.Click += async (_, _) => await Scan();
-        var hide = Button("收起到托盘"); hide.Click += (_, _) => Hide(); bar.Controls.Add(hide);
-        var exit = Button("退出程序"); exit.Click += (_, _) => Exit(); bar.Controls.Add(exit);
-        screenTab.Controls.Add(displayList); screenTab.Controls.Add(bar);
-        var keysTab = new TabPage("快捷键") { BackColor = BackColor, Padding = new(16) };
-        BuildKeys(keysTab);
-        var diagnosticsTab = new TabPage("检测与帮助") { BackColor = Color.White, Padding = new(16) };
-        var diagBar = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 48 };
-        var export = Button("导出检测报告"); export.Click += (_, _) => ExportReport(); diagBar.Controls.Add(export);
-        diagnosticsTab.Controls.Add(diagnostics); diagnosticsTab.Controls.Add(diagBar);
-        tabs.TabPages.AddRange([screenTab, keysTab, diagnosticsTab]);
-        Controls.Add(tabs); Controls.Add(header); Controls.Add(status);
+        bar.Controls.Add(new Label { Text = "拖动滑块调节亮度，点击右上角齿轮设置快捷键。", AutoSize = true, Padding = new(4, 5, 0, 0), ForeColor = Color.FromArgb(92, 105, 120) });
+        screenPanel.Controls.Add(displayList); screenPanel.Controls.Add(bar);
+        Controls.Add(screenPanel); Controls.Add(header); Controls.Add(status);
+        settingsWindow = BuildSettingsWindow();
+        displayList.SizeChanged += (_, _) => ResizeCards();
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("打开亮度面板", null, (_, _) => ShowPanel());
         menu.Items.Add("全部屏幕 +" + settings.Step + "%", null, async (_, _) => await Adjust("all", settings.Step));
         menu.Items.Add("全部屏幕 −" + settings.Step + "%", null, async (_, _) => await Adjust("all", -settings.Step));
         menu.Items.Add("重新检测", null, async (_, _) => await Scan());
+        menu.Items.Add("设置", null, (_, _) => ShowSettings());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => Exit());
-        tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "ScreenLight · 屏幕亮度", Visible = true, ContextMenuStrip = menu };
+        tray = new NotifyIcon { Icon = appIcon, Text = "ScreenLight · 屏幕亮度", Visible = true, ContextMenuStrip = menu };
         tray.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowPanel(); };
-        FormClosing += (_, e) => { if (!quitting) { e.Cancel = true; Hide(); tray.ShowBalloonTip(2500, "ScreenLight 正在托盘运行", "快捷键仍然有效。右键托盘图标可退出。", ToolTipIcon.Info); } };
+        FormClosing += (_, e) =>
+        {
+            if (quitting || e.CloseReason != CloseReason.UserClosing) return;
+            e.Cancel = true;
+            if (settings.CloseAction == WindowCloseAction.HideToTray)
+            {
+                settingsWindow.Hide(); Hide();
+                if (!preview) tray.ShowBalloonTip(2500, "ScreenLight 正在托盘运行", "快捷键仍然有效。右键托盘图标可退出。", ToolTipIcon.Info);
+            }
+            else BeginInvoke((Action)Exit);
+        };
         topologyTimer.Tick += async (_, _) => { topologyTimer.Stop(); await Scan(); };
         SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
         SystemEvents.PowerModeChanged += OnPowerChanged;
         Shown += async (_, _) =>
         {
+            if (startInTray) Hide();
             if (!preview)
             {
                 var error = Register(settings.Hotkeys);
-                if (error.Length > 0) { SetStatus(error); MessageBox.Show(this, error + "\n请在“快捷键”页更改并保存。", "快捷键冲突", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+                if (error.Length > 0)
+                {
+                    SetStatus(error);
+                    if (startInTray) tray.ShowBalloonTip(3500, "快捷键冲突", error + " 请打开设置修改。", ToolTipIcon.Warning);
+                    else MessageBox.Show(this, error + "\n请在右上角“设置 → 快捷键”中更改并保存。", "快捷键冲突", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
             }
             await Scan();
             if (initialError.Length > 0) SetStatus(initialError);
         };
     }
     private static Button Button(string text) => new() { Text = text, AutoSize = true, Height = 32, Padding = new(9, 2, 9, 2), FlatStyle = FlatStyle.System, Margin = new(0, 0, 10, 0) };
+    private Form BuildSettingsWindow()
+    {
+        var window = new Form { Text = "ScreenLight · 设置", Icon = appIcon, Font = Font, ClientSize = new(760, 530), MinimumSize = new(720, 530), StartPosition = FormStartPosition.CenterParent, BackColor = BackColor, ShowInTaskbar = false };
+        var general = new TabPage("常规") { BackColor = BackColor, Padding = new(20) };
+        var content = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true };
+        content.Controls.Add(new Label { Text = "启动与关闭", Font = new(Font.FontFamily, 15, FontStyle.Bold), AutoSize = true, Margin = new(0, 4, 0, 22) });
+        startupOption.Margin = new(0, 0, 0, 8); content.Controls.Add(startupOption);
+        content.Controls.Add(new Label { Text = "默认关闭。启用后登录 Windows 时在托盘运行，快捷键可直接使用。\n请把程序保存在固定文件夹；移动程序后重新保存此设置。", AutoSize = true, ForeColor = Color.FromArgb(92, 105, 120), Margin = new(0, 0, 0, 25) });
+        content.Controls.Add(new Label { Text = "点击主窗口右上角 × 时", AutoSize = true, Margin = new(0, 0, 0, 10) });
+        closeOption.Items.AddRange(["收起到托盘（快捷键继续生效）", "直接退出软件（释放快捷键）"]);
+        closeOption.SelectedIndex = (int)settings.CloseAction;
+        content.Controls.Add(closeOption);
+        content.Controls.Add(new Label { Text = "设置窗口的 × 仅关闭设置面板。托盘菜单中的“退出”始终完全退出软件。", AutoSize = true, ForeColor = Color.FromArgb(92, 105, 120), Margin = new(0, 12, 0, 25) });
+        var save = Button("保存常规设置"); save.Enabled = !preview; save.Click += (_, _) => SaveGeneral(); content.Controls.Add(save);
+        generalStatus.Margin = new(0, 16, 0, 0); content.Controls.Add(generalStatus);
+        general.Controls.Add(content);
+        var keys = new TabPage("快捷键") { BackColor = BackColor, Padding = new(16) }; BuildKeys(keys);
+        var help = new TabPage("检测与帮助") { BackColor = Color.White, Padding = new(16) };
+        var diagBar = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 48 };
+        var export = Button("导出检测报告"); export.Click += (_, _) => ExportReport(); diagBar.Controls.Add(export);
+        var detect = Button("重新检测"); detect.Click += async (_, _) => await Scan(); diagBar.Controls.Add(detect);
+        help.Controls.Add(diagnostics); help.Controls.Add(diagBar);
+        settingsTabs.TabPages.AddRange([general, keys, help]); window.Controls.Add(settingsTabs);
+        window.FormClosing += (_, e) => { if (!quitting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; window.Hide(); } };
+        return window;
+    }
+    private void ShowSettings()
+    {
+        if (quitting) return;
+        if (settingsWindow.Visible) { settingsWindow.Activate(); return; }
+        closeOption.SelectedIndex = (int)settings.CloseAction;
+        try
+        {
+            startupOption.Checked = startup.IsEnabled(Environment.ProcessPath!);
+            startupOption.Enabled = !preview;
+            generalStatus.Text = "更改后点击保存即可生效。";
+        }
+        catch (Exception ex) { startupOption.Enabled = false; generalStatus.Text = "无法读取开机启动设置：" + ex.Message; }
+        UpdateDiagnostics(); settingsWindow.Show(this); settingsWindow.Activate();
+    }
+    private void SaveGeneral()
+    {
+        if (preview || !startupOption.Enabled) return;
+        try
+        {
+            GeneralOptions.Apply(settings, startup, startupOption.Checked, (WindowCloseAction)closeOption.SelectedIndex, Environment.ProcessPath!);
+            generalStatus.Text = "已保存。开机自启动：" + (settings.StartWithWindows ? "开启" : "关闭") + "；主窗口关闭时：" + (settings.CloseAction == WindowCloseAction.HideToTray ? "收起到托盘。" : "直接退出软件。");
+            SetStatus("常规设置已保存并生效。");
+        }
+        catch (Exception ex) { generalStatus.Text = "设置保存失败：" + ex.Message; }
+    }
+    internal Form OpenSettingsForVerification(int tabIndex) { ShowSettings(); settingsTabs.SelectedIndex = tabIndex; settingsWindow.Refresh(); return settingsWindow; }
     private void BuildKeys(TabPage page)
     {
         var content = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true };
@@ -116,7 +197,7 @@ internal sealed class MainForm : Form
         stepRow.Controls.Add(new Label { Text = "每次调整", Width = 100, Height = 30, TextAlign = ContentAlignment.MiddleLeft }); stepRow.Controls.Add(step);
         stepRow.Controls.Add(new Label { Text = "%（1–25）", AutoSize = true, Padding = new(0, 5, 15, 0) });
         var save = Button("保存并启用快捷键"); save.Click += (_, _) => SaveKeys(); stepRow.Controls.Add(save);
-        footer.Controls.Add(new Label { Text = "关闭窗口后仍可使用快捷键；退出程序后释放快捷键。\n若组合键被其他程序占用，会提示冲突。", Dock = DockStyle.Bottom, Height = 44, ForeColor = Color.FromArgb(92, 105, 120) });
+        footer.Controls.Add(new Label { Text = "收起到托盘后快捷键继续有效；退出软件后释放快捷键。\n若组合键被其他程序占用，会提示冲突。", Dock = DockStyle.Bottom, Height = 44, ForeColor = Color.FromArgb(92, 105, 120) });
         footer.Controls.Add(stepRow);
         page.Controls.Add(content); page.Controls.Add(footer);
     }
@@ -166,6 +247,11 @@ internal sealed class MainForm : Form
         }
         if (service.Displays.Count == 0) displayList.Controls.Add(new Label { Text = "未检测到桌面屏幕。请在本机桌面运行后重新检测。", AutoSize = true });
         displayList.Controls.Add(new Label { Text = "拖动滑块后自动应用。连接变化或休眠唤醒后会自动重新检测。", AutoSize = true, ForeColor = Color.FromArgb(96, 111, 127), Margin = new(3, 4, 0, 0) });
+        ResizeCards();
+    }
+    private void ResizeCards()
+    {
+        foreach (var card in displayList.Controls.OfType<Panel>()) card.Width = Math.Max(600, displayList.ClientSize.Width - displayList.Padding.Horizontal - 20);
     }
     private void UpdateDiagnostics()
     {
@@ -270,7 +356,7 @@ internal sealed class MainForm : Form
     private void ExportReport()
     {
         using var dialog = new SaveFileDialog { Filter = "检测报告 (*.json)|*.json", FileName = "ScreenLight-diagnostics.json" };
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        if (dialog.ShowDialog(settingsWindow) != DialogResult.OK) return;
         try { File.WriteAllText(dialog.FileName, JsonSerializer.Serialize(new { Time = DateTimeOffset.Now, service.WmiError, Displays = service.Displays }, Program.Json)); SetStatus("检测报告已导出。"); }
         catch (Exception ex) { SetStatus("报告导出失败：" + ex.Message); }
     }
@@ -279,7 +365,7 @@ internal sealed class MainForm : Form
         if (quitting) return;
         quitting = true; Unregister(); topologyTimer.Stop();
         foreach (var timer in debounce.Values) timer.Stop();
-        Hide(); tray.Visible = false;
+        settingsWindow.Hide(); Hide(); tray.Visible = false;
         // Finish outstanding native I/O before releasing physical monitor handles.
         while (activeOperations > 0) await Task.Delay(50);
         Close();
@@ -291,7 +377,7 @@ internal sealed class MainForm : Form
             resourcesDisposed = true;
             SystemEvents.DisplaySettingsChanged -= OnDisplayChanged; SystemEvents.PowerModeChanged -= OnPowerChanged;
             Unregister(); topologyTimer.Dispose(); foreach (var timer in debounce.Values) timer.Dispose();
-            tray.Dispose(); service.Dispose();
+            settingsWindow.Dispose(); tray.Dispose(); service.Dispose(); gearImage.Dispose(); appIcon.Dispose();
         }
         base.Dispose(disposing);
     }

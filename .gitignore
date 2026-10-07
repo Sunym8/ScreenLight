@@ -6,6 +6,7 @@ dist/
 diagnostics.json
 hardware-verification.json
 self-test.txt
+settings-verification.txt
 *.zip
 .vs/
 *.user

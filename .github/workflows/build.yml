@@ -3,6 +3,7 @@ name: Build Windows app
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -15,11 +16,19 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
       - name: Build portable app
-        run: dotnet publish BrightnessControl.csproj -c Release --self-contained false -o dist
+        run: dotnet publish BrightnessControl.csproj -c Release -r win-x64 --self-contained false -o dist
+      - name: Validate release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = ([xml](Get-Content BrightnessControl.csproj -Raw)).Project.PropertyGroup.Version
+          if ($env:GITHUB_REF_NAME -ne ('v' + $version)) { throw 'Release tag must match the project version.' }
       - name: Include documentation
         shell: pwsh
         run: Copy-Item -LiteralPath README.md -Destination dist/README.md
@@ -28,3 +37,28 @@ jobs:
           name: ScreenLight-windows
           path: dist/
           if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ScreenLight-windows
+          path: dist
+      - name: Package and publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $package = 'ScreenLight-' + $env:GITHUB_REF_NAME + '-windows-x64.zip'
+          Compress-Archive -Path dist/* -DestinationPath $package
+          gh release create $env:GITHUB_REF_NAME $package --verify-tag --latest --title ('ScreenLight ' + $env:GITHUB_REF_NAME) --notes-file RELEASE_NOTES.md --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }

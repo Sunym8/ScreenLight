@@ -2,6 +2,8 @@ using System.Text.Json;
 
 namespace ScreenLight;
 
+internal enum WindowCloseAction { HideToTray, ExitApplication }
+
 internal sealed class HotkeyBinding
 {
     public string Target { get; set; } = "all";
@@ -17,6 +19,8 @@ internal sealed class HotkeyBinding
 internal sealed class Settings
 {
     public int Step { get; set; } = 5;
+    public bool StartWithWindows { get; set; }
+    public WindowCloseAction CloseAction { get; set; } = WindowCloseAction.HideToTray;
     public List<HotkeyBinding> Hotkeys { get; set; } = Defaults();
     internal static List<HotkeyBinding> Defaults() =>
     [
@@ -31,24 +35,26 @@ internal sealed class Settings
     ];
     internal static string DirectoryPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScreenLight");
     internal static string FilePath => Path.Combine(DirectoryPath, "settings.json");
-    internal static Settings Load(out string error)
+    internal static Settings Load(out string error, string? filePath = null)
     {
         error = "";
-        if (!File.Exists(FilePath)) return new();
+        var path = filePath ?? FilePath;
+        if (!File.Exists(path)) return new();
         try
         {
-            var loaded = JsonSerializer.Deserialize<Settings>(File.ReadAllText(FilePath)) ?? throw new Exception("设置为空");
-            if (loaded.Step < 1 || loaded.Step > 25 || loaded.Hotkeys.Count != 8 || loaded.Hotkeys.Any(h => h.Key > 255 || h.Key == 0 || h.Modifiers > 15 || !new[] { "all", "internal", "external", "cursor" }.Contains(h.Target)))
+            var loaded = JsonSerializer.Deserialize<Settings>(File.ReadAllText(path), Program.Json) ?? throw new Exception("设置为空");
+            if (loaded.Step < 1 || loaded.Step > 25 || !Enum.IsDefined(loaded.CloseAction) || loaded.Hotkeys == null || loaded.Hotkeys.Count != 8 || loaded.Hotkeys.Any(h => h == null || h.Key > 255 || h.Key == 0 || h.Modifiers > 15 || !new[] { "all", "internal", "external", "cursor" }.Contains(h.Target)))
                 throw new Exception("设置内容无效");
             return loaded;
         }
         catch (Exception ex) { error = "设置读取失败，已使用默认值：" + ex.Message; return new(); }
     }
-    internal void Save()
+    internal void Save(string? filePath = null)
     {
-        Directory.CreateDirectory(DirectoryPath);
-        var temporary = FilePath + ".tmp";
+        var path = filePath ?? FilePath;
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        var temporary = path + ".tmp";
         File.WriteAllText(temporary, JsonSerializer.Serialize(this, Program.Json));
-        File.Move(temporary, FilePath, true);
+        File.Move(temporary, path, true);
     }
 }
