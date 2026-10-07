@@ -1,0 +1,12 @@
+bin/
+obj/
+dist/
+.dotnet-home/
+*.png
+diagnostics.json
+hardware-verification.json
+self-test.txt
+*.zip
+.vs/
+*.user
+*.suo

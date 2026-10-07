@@ -1,0 +1,30 @@
+name: Build Windows app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build portable app
+        run: dotnet publish BrightnessControl.csproj -c Release --self-contained false -o dist
+      - name: Include documentation
+        shell: pwsh
+        run: Copy-Item -LiteralPath README.md -Destination dist/README.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenLight-windows
+          path: dist/
+          if-no-files-found: error
